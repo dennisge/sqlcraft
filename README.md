@@ -7,16 +7,15 @@ A MyBatis-style fluent SQL builder for Go with pluggable execution providers.
 
 ## Features
 
-- **Fluent API** — chainable methods for SELECT, INSERT, UPDATE, DELETE
-- **Provider-aware binding** — `#{name}` placeholders are compiled to the active provider safely
-- **Literal injection** — `${name}` placeholders for trusted column/table names
-- **Selective methods** — `WhereSelective`, `SetSelective`, `ValuesSelective` skip zero-valued args automatically
-- **WhereIn / WhereNotIn** — convenient IN clause builders with type-safe int64 variants
-- **Transaction support** — simple callback-based transactions
-- **Pluggable providers** — choose [GORM](https://gorm.io) or native `database/sql`
-- **Multi-database** — MySQL and PostgreSQL helpers for both providers
-- **Generated ID APIs** — `ExecResult()` for insert metadata and `Returning(...)` for PostgreSQL-style returned rows
-- **Three layers** — use only what you need: SQL text assembly, fluent session, or driver setup
+- **Fluent API** for SELECT, INSERT, UPDATE, and DELETE
+- **Provider-aware binding** for GORM and native `database/sql`
+- **Named placeholders** with `#{name}` for safe parameter binding
+- **Trusted literal injection** with `${name}` for column/table names
+- **Selective methods** such as `WhereSelective`, `SetSelective`, and `ValuesSelective`
+- **Convenient IN builders** with `WhereIn`, `WhereNotIn`, and `[]int64` helpers
+- **Transaction support** with a callback-based API
+- **Generated ID helpers** via `ExecResult()` and `Returning(...)`
+- **Layered design** with `sqltext`, `session`, and `driver` packages
 
 ## Installation
 
@@ -26,16 +25,21 @@ go get github.com/dennisge/sqlcraft
 
 ## Quick Start
 
-### 1. Choose a provider
+### Pick the right entry point
 
-`sqlcraft` separates database connection helpers from the fluent session API:
+For most application code, prefer the provider-specific helper packages in `driver/mysql` and `driver/postgres`.
+They hide dialect details for `database/sql` and make the recommended path obvious.
 
-- `driver/mysql` and `driver/postgres` open either GORM or `database/sql` connections
-- `mysql.OpenSession(...)`, `postgres.OpenSession(...)`, `mysql.NewSession(...)`, and `postgres.NewSession(...)` are the preferred provider-specific session entry points
-- `session.NewGorm(...)` / `session.New(...)` bind a GORM connection to the fluent API
-- `session.NewStdMySQL(...)`, `session.NewStdPostgres(...)`, or `session.NewStd(...)` remain available as lower-level escape hatches when you need manual wiring
+| Situation | Recommended API | Why |
+|----------|------------------|-----|
+| You have a `driver.Config` and want a GORM-backed session | `mysql.OpenGormSession(cfg)` / `postgres.OpenGormSession(cfg)` | Opens the DB and returns a ready-to-use `session.Session` |
+| You have a `driver.Config` and want a native `database/sql` session | `mysql.OpenSession(cfg)` / `postgres.OpenSession(cfg)` | Opens the DB, applies pool settings, and hides dialect wiring |
+| You already have a `*gorm.DB` | `session.NewGorm(db)` | GORM already knows the database dialect |
+| You already have a `*sql.DB` | `mysql.NewSession(db)` / `postgres.NewSession(db)` | Keeps dialect selection in the provider package |
+| You need the raw DB handle for `Close`, `Ping`, or other integrations | `mysql.OpenGorm(cfg)` / `mysql.OpenStd(cfg)` and then bind manually | Gives you both the raw connection and the fluent session |
+| You need advanced or custom wiring | `session.NewStd(db, session.Dialect...)` | Lowest-level escape hatch |
 
-### 2. Connect with GORM provider
+### GORM quick start
 
 ```go
 import (
@@ -48,17 +52,25 @@ sess, err := mysql.OpenGormSession(&driver.Config{
     MaxOpen: 25,
     MaxIdle: 10,
 })
-```
+if err != nil {
+    return err
+}
 
-```go
-err := sess.
+type User struct {
+    ID       int64
+    UserName string
+    Status   int
+}
+
+var users []User
+err = sess.
     Select("id", "user_name", "status").
     From("users").
     Where("status = #{status}", 1).
     Scan(&users)
 ```
 
-### 3. Connect with native `database/sql`
+### `database/sql` quick start
 
 ```go
 import (
@@ -71,19 +83,29 @@ sess, err := postgres.OpenSession(&driver.Config{
     MaxOpen: 25,
     MaxIdle: 10,
 })
-```
+if err != nil {
+    return err
+}
 
-```go
-err := sess.
+type User struct {
+    ID       int64
+    UserName string
+    Status   int
+}
+
+var users []User
+err = sess.
     Select("id", "user_name", "status").
     From("users").
     Where("status = #{status}", 1).
     Scan(&users)
 ```
 
-### 4. Query
+## Common Patterns
 
-The following examples use the GORM provider for brevity. For `database/sql`, keep the chain the same and swap the constructor to `mysql.NewSession(...)`, `postgres.NewSession(...)`, or the lower-level `session.NewStd(...)`.
+The following examples assume you already created `sess` using one of the snippets above.
+
+### Query
 
 ```go
 type User struct {
@@ -93,7 +115,7 @@ type User struct {
 }
 
 var users []User
-err := session.NewGorm(db).
+err := sess.
     Select("id", "user_name", "status").
     From("users u").
     Where("status = #{status}", 1).
@@ -103,20 +125,20 @@ err := session.NewGorm(db).
     Scan(&users)
 ```
 
-### 5. Insert
+### Insert
 
 ```go
-rows, err := session.NewGorm(db).
+rows, err := sess.
     InsertInto("users").
     Values("user_name", "alice").
     Values("status", 1).
     Exec()
 ```
 
-### 6. Bulk Insert
+### Bulk Insert
 
 ```go
-rows, err := session.NewGorm(db).
+rows, err := sess.
     InsertInto("users").
     IntoColumns("user_name", "status").
     IntoMultiValues([][]any{
@@ -127,10 +149,10 @@ rows, err := session.NewGorm(db).
     Exec()
 ```
 
-### 7. Update
+### Update
 
 ```go
-rows, err := session.NewGorm(db).
+rows, err := sess.
     Update("users").
     Set("status", 0).
     SetSelective("user_name", newName). // skipped if newName is ""
@@ -138,19 +160,21 @@ rows, err := session.NewGorm(db).
     Exec()
 ```
 
-### 8. Delete
+### Delete
 
 ```go
-rows, err := session.NewGorm(db).
+rows, err := sess.
     DeleteFrom("users").
     Where("status = #{status}", 0).
     Exec()
 ```
 
-### 9. Transaction
+### Transaction
 
 ```go
-err := session.NewGorm(db).Transaction(func(tx session.Session) error {
+import "github.com/dennisge/sqlcraft/session"
+
+err := sess.Transaction(func(tx session.Session) error {
     _, err := tx.Update("accounts").
         Set("balance", 100).
         Where("id = #{id}", 1).
@@ -158,6 +182,7 @@ err := session.NewGorm(db).Transaction(func(tx session.Session) error {
     if err != nil {
         return err
     }
+
     _, err = tx.Update("accounts").
         Set("balance", 200).
         Where("id = #{id}", 2).
@@ -166,35 +191,31 @@ err := session.NewGorm(db).Transaction(func(tx session.Session) error {
 })
 ```
 
-### 10. Dynamic column injection
+## Generated IDs
 
-Use `${...}` for **trusted** column/table names only (never user input):
+Generated ID handling is database-specific.
 
-```go
-var results []Map
-err := session.NewGorm(db).
-    Select("${col}", "count(*)").
-    From("orders").
-    GroupBy("${col}").
-    AddParam("${col}", "region").
-    Scan(&results)
-```
+| Database | Recommended pattern | Notes |
+|----------|---------------------|-------|
+| MySQL | `ExecResult()` | `InsertID()` and `InsertIDs()` work for auto-increment inserts |
+| PostgreSQL | `Returning(...).Scan(...)` | `LastInsertId` is not the standard path |
 
-### 11. Insert metadata and generated IDs
-
-Use `ExecResult()` when the provider/database can expose `LastInsertID` style metadata:
+### MySQL-style insert metadata
 
 ```go
-result, err := mysql.NewSession(db).
+result, err := sess.
     InsertInto("users").
     Values("user_name", "alice").
     ExecResult()
+if err != nil {
+    return err
+}
 
 firstID, err := result.InsertID()
-batchIDs, err := result.InsertIDs() // derives [firstID, firstID+1, ...] for sequential auto-increment inserts
+batchIDs, err := result.InsertIDs() // derives [firstID, firstID+1, ...]
 ```
 
-For databases like PostgreSQL, prefer `Returning(...)` and `Scan(...)`:
+### PostgreSQL-style `RETURNING`
 
 ```go
 type InsertedID struct {
@@ -202,7 +223,7 @@ type InsertedID struct {
 }
 
 var inserted []InsertedID
-err := postgres.NewSession(db).
+err := sess.
     InsertInto("users").
     IntoColumns("user_name", "status").
     IntoMultiValues([][]any{
@@ -213,27 +234,52 @@ err := postgres.NewSession(db).
     Scan(&inserted)
 ```
 
+## Dynamic Identifiers
+
+Use `${...}` only for trusted column or table names.
+Never pass user input through `${...}`.
+
+```go
+var results []map[string]any
+err := sess.
+    Select("${col}", "count(*) AS total").
+    From("orders").
+    GroupBy("${col}").
+    AddParam("${col}", "region").
+    Scan(&results)
+```
+
 ## Placeholder Reference
 
 | Syntax | Behavior | Safety |
 |--------|----------|--------|
 | `#{name}` | Parameterized binding; rendered per provider (`@name`, `?`, `$1`, ...) | Safe against SQL injection |
-| `${name}` | Literal string replacement | **Unsafe** — use only for trusted values |
+| `${name}` | Literal string replacement | Unsafe; use only for trusted values |
+
+## Lower-Level APIs
+
+If you need more control than the provider helpers offer:
+
+- Use `mysql.OpenGorm(cfg)` / `mysql.OpenStd(cfg)` or `postgres.OpenGorm(cfg)` / `postgres.OpenStd(cfg)` when you need the raw DB handle
+- Use `session.NewGorm(db)` when you already have a `*gorm.DB`
+- Use `mysql.NewSession(db)` or `postgres.NewSession(db)` when you already have a `*sql.DB`
+- Use `session.NewStd(db, session.DialectMySQL)` or `session.NewStd(db, session.DialectPostgres)` only for advanced manual wiring
+- Use `sqltext` directly when you only want SQL string assembly
 
 ## Architecture
 
-```
+```text
 sqlcraft/
-  sqltext/    — low-level SQL text builder (no DB, no params)
-  session/    — fluent Session with provider abstraction (GORM or database/sql)
-  driver/     — connection helpers
-    mysql/    — MySQL helpers for GORM and database/sql
-    postgres/ — PostgreSQL helpers for GORM and database/sql
+  sqltext/    - low-level SQL text builder (no DB, no params)
+  session/    - fluent Session with provider abstraction
+  driver/     - connection and session helpers
+    mysql/    - MySQL helpers for GORM and database/sql
+    postgres/ - PostgreSQL helpers for GORM and database/sql
 ```
 
-## Low-level: sqltext only
+## `sqltext` Only
 
-If you only need SQL text assembly without parameter binding:
+If you only need SQL text assembly without parameter binding or execution:
 
 ```go
 import "github.com/dennisge/sqlcraft/sqltext"
@@ -244,6 +290,7 @@ sql.From("users")
 sql.Where("status = 1")
 sql.OrderBy("id")
 sql.Limit("10")
+
 fmt.Println(sql.String())
 // SELECT id, name
 // FROM users
@@ -253,4 +300,4 @@ fmt.Println(sql.String())
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for details.
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
