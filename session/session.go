@@ -23,6 +23,10 @@
 //   - database/sql (MySQL): use [NewStdMySQL] to create a stdlib MySQL session
 //   - database/sql (PostgreSQL): use [NewStdPostgres] to create a stdlib PostgreSQL session
 //   - database/sql (generic): use [NewStd] with an explicit [Dialect]
+//
+// When you already know the database package at compile time, prefer the
+// provider-specific helpers in [github.com/dennisge/sqlcraft/driver/mysql] or
+// [github.com/dennisge/sqlcraft/driver/postgres], such as OpenSession or NewSession.
 package session
 
 import "database/sql"
@@ -40,6 +44,8 @@ type TxFunc func(session Session) error
 // Session is backend-agnostic — the same interface works with GORM, database/sql
 // for MySQL, or database/sql for PostgreSQL. Use [New], [NewGorm], [NewStd],
 // [NewStdMySQL], or [NewStdPostgres] to create an appropriate implementation.
+// For application code, the provider-specific helper packages usually offer a
+// cleaner entry point because they can encode the dialect in the package API.
 type Session interface {
 
 	// ---- SELECT ----

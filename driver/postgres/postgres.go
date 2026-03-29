@@ -18,6 +18,7 @@ package postgres
 import (
 	"database/sql"
 
+	"github.com/dennisge/sqlcraft/session"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -34,7 +35,10 @@ func Open(cfg *driver.Config, gormCfg ...*gorm.Config) (*gorm.DB, error) {
 // OpenGorm creates a new GORM DB connection for PostgreSQL with the given config.
 // Optional gorm.Config can be passed to customize GORM behavior.
 func OpenGorm(cfg *driver.Config, gormCfg ...*gorm.Config) (*gorm.DB, error) {
-	cfg.SetDefaults()
+	cfg = driver.NormalizeConfig(cfg)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	var gc *gorm.Config
 	if len(gormCfg) > 0 && gormCfg[0] != nil {
 		gc = gormCfg[0]
@@ -53,11 +57,42 @@ func OpenGorm(cfg *driver.Config, gormCfg ...*gorm.Config) (*gorm.DB, error) {
 
 // OpenStd creates a new database/sql DB connection for PostgreSQL with the given config.
 func OpenStd(cfg *driver.Config) (*sql.DB, error) {
-	cfg.SetDefaults()
+	cfg = driver.NormalizeConfig(cfg)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("pgx", cfg.DSN)
 	if err != nil {
 		return nil, err
 	}
 	driver.ConfigureSQLPool(db, cfg)
 	return db, nil
+}
+
+// NewSession binds an existing database/sql DB to a PostgreSQL-flavored sqlcraft session.
+func NewSession(db *sql.DB) session.Session {
+	return session.NewStdPostgres(db)
+}
+
+// NewGormSession binds an existing GORM DB to a sqlcraft session.
+func NewGormSession(db *gorm.DB) session.Session {
+	return session.NewGorm(db)
+}
+
+// OpenSession opens a native database/sql connection and returns a PostgreSQL-flavored sqlcraft session.
+func OpenSession(cfg *driver.Config) (session.Session, error) {
+	db, err := OpenStd(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewSession(db), nil
+}
+
+// OpenGormSession opens a GORM connection and returns a sqlcraft session bound to it.
+func OpenGormSession(cfg *driver.Config, gormCfg ...*gorm.Config) (session.Session, error) {
+	db, err := OpenGorm(cfg, gormCfg...)
+	if err != nil {
+		return nil, err
+	}
+	return NewGormSession(db), nil
 }

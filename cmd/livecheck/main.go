@@ -10,7 +10,6 @@ import (
 	sqldriver "github.com/dennisge/sqlcraft/driver"
 	mysqlhelper "github.com/dennisge/sqlcraft/driver/mysql"
 	postgreshelper "github.com/dennisge/sqlcraft/driver/postgres"
-	"github.com/dennisge/sqlcraft/session"
 )
 
 func main() {
@@ -55,7 +54,7 @@ func runMySQL(cfg *sqldriver.Config) error {
 	fmt.Println("== MySQL ==")
 
 	stdSingleMarker := "mysql-std-single"
-	stdSingleResult, err := session.NewStdMySQL(stdDB).
+	stdSingleResult, err := mysqlhelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		Values("marker", stdSingleMarker).
 		Values("note", "std single exec").
@@ -71,7 +70,7 @@ func runMySQL(cfg *sqldriver.Config) error {
 	fmt.Printf("std Session.ExecResult single  -> rowsAffected=%d, lastInsertID=%d, insertedIDs=%v\n", stdSingleResult.RowsAffected, stdSingleInsertID, stdSingleIDs)
 
 	stdBatchPrefix := "mysql-std-batch"
-	stdBatchResult, err := session.NewStdMySQL(stdDB).
+	stdBatchResult, err := mysqlhelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		IntoColumns("marker", "note").
 		IntoMultiValues([][]any{
@@ -124,7 +123,7 @@ func runMySQL(cfg *sqldriver.Config) error {
 	fmt.Printf("direct sql.Result batch        -> LastInsertId=%d, actualInsertedIDs=%v\n", rawBatchFirstID, rawBatchIDs)
 
 	gormSingleMarker := "mysql-gorm-single"
-	gormSingleResult, err := session.NewGorm(gormDB).
+	gormSingleResult, err := mysqlhelper.NewGormSession(gormDB).
 		InsertInto("exec_probe").
 		Values("marker", gormSingleMarker).
 		Values("note", "gorm single exec").
@@ -140,7 +139,7 @@ func runMySQL(cfg *sqldriver.Config) error {
 	fmt.Printf("gorm Session.ExecResult single -> rowsAffected=%d, lastInsertID=%d, insertedIDs=%v\n", gormSingleResult.RowsAffected, gormSingleInsertID, gormSingleIDs)
 
 	gormBatchPrefix := "mysql-gorm-batch"
-	gormBatchResult, err := session.NewGorm(gormDB).
+	gormBatchResult, err := mysqlhelper.NewGormSession(gormDB).
 		InsertInto("exec_probe").
 		IntoColumns("marker", "note").
 		IntoMultiValues([][]any{
@@ -183,7 +182,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Println("== PostgreSQL ==")
 
 	stdSingleMarker := "pg-std-single"
-	stdSingleResult, err := session.NewStdPostgres(stdDB).
+	stdSingleResult, err := postgreshelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		Values("marker", stdSingleMarker).
 		Values("note", "std single exec").
@@ -199,7 +198,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Printf("std Session.ExecResult single  -> rowsAffected=%d, insertIDErr=%v, insertedIDs=%v\n", stdSingleResult.RowsAffected, stdSingleInsertErr, stdSingleIDs)
 
 	stdBatchPrefix := "pg-std-batch"
-	stdBatchResult, err := session.NewStdPostgres(stdDB).
+	stdBatchResult, err := postgreshelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		IntoColumns("marker", "note").
 		IntoMultiValues([][]any{
@@ -246,7 +245,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Printf("direct sql.Result batch        -> LastInsertId=%d, err=%v, actualInsertedIDs=%v\n", rawBatchFirstID, batchLastInsertErr, rawBatchIDs)
 
 	var returningSingleStd []idRow
-	err = session.NewStdPostgres(stdDB).
+	err = postgreshelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		Values("marker", "pg-std-returning-single").
 		Values("note", "std returning single").
@@ -258,7 +257,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Printf("std INSERT ... RETURNING       -> returnedIDs=%v\n", extractIDs(returningSingleStd))
 
 	var returningBatchStd []idRow
-	err = session.NewStdPostgres(stdDB).
+	err = postgreshelper.NewSession(stdDB).
 		InsertInto("exec_probe").
 		IntoColumns("marker", "note").
 		IntoMultiValues([][]any{
@@ -274,7 +273,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Printf("std batch ... RETURNING        -> returnedIDs=%v\n", extractIDs(returningBatchStd))
 
 	var returningSingleGorm []idRow
-	err = session.NewGorm(gormDB).
+	err = postgreshelper.NewGormSession(gormDB).
 		InsertInto("exec_probe").
 		Values("marker", "pg-gorm-returning-single").
 		Values("note", "gorm returning single").
@@ -286,7 +285,7 @@ func runPostgres(cfg *sqldriver.Config) error {
 	fmt.Printf("gorm INSERT ... RETURNING      -> returnedIDs=%v\n", extractIDs(returningSingleGorm))
 
 	var returningBatchGorm []idRow
-	err = session.NewGorm(gormDB).
+	err = postgreshelper.NewGormSession(gormDB).
 		InsertInto("exec_probe").
 		IntoColumns("marker", "note").
 		IntoMultiValues([][]any{

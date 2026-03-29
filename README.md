@@ -31,8 +31,9 @@ go get github.com/dennisge/sqlcraft
 `sqlcraft` separates database connection helpers from the fluent session API:
 
 - `driver/mysql` and `driver/postgres` open either GORM or `database/sql` connections
+- `mysql.OpenSession(...)`, `postgres.OpenSession(...)`, `mysql.NewSession(...)`, and `postgres.NewSession(...)` are the preferred provider-specific session entry points
 - `session.NewGorm(...)` / `session.New(...)` bind a GORM connection to the fluent API
-- `session.NewStdMySQL(...)`, `session.NewStdPostgres(...)`, or `session.NewStd(...)` bind a native `database/sql` connection
+- `session.NewStdMySQL(...)`, `session.NewStdPostgres(...)`, or `session.NewStd(...)` remain available as lower-level escape hatches when you need manual wiring
 
 ### 2. Connect with GORM provider
 
@@ -40,10 +41,9 @@ go get github.com/dennisge/sqlcraft
 import (
     "github.com/dennisge/sqlcraft/driver"
     "github.com/dennisge/sqlcraft/driver/mysql"
-    "github.com/dennisge/sqlcraft/session"
 )
 
-db, err := mysql.OpenGorm(&driver.Config{
+sess, err := mysql.OpenGormSession(&driver.Config{
     DSN:     "user:pass@tcp(127.0.0.1:3306)/mydb?charset=utf8mb4&parseTime=True&loc=UTC",
     MaxOpen: 25,
     MaxIdle: 10,
@@ -51,7 +51,7 @@ db, err := mysql.OpenGorm(&driver.Config{
 ```
 
 ```go
-err := session.NewGorm(db).
+err := sess.
     Select("id", "user_name", "status").
     From("users").
     Where("status = #{status}", 1).
@@ -64,10 +64,9 @@ err := session.NewGorm(db).
 import (
     "github.com/dennisge/sqlcraft/driver"
     "github.com/dennisge/sqlcraft/driver/postgres"
-    "github.com/dennisge/sqlcraft/session"
 )
 
-db, err := postgres.OpenStd(&driver.Config{
+sess, err := postgres.OpenSession(&driver.Config{
     DSN:     "postgres://user:pass@127.0.0.1:5432/mydb?sslmode=disable",
     MaxOpen: 25,
     MaxIdle: 10,
@@ -75,7 +74,7 @@ db, err := postgres.OpenStd(&driver.Config{
 ```
 
 ```go
-err := session.NewStdPostgres(db).
+err := sess.
     Select("id", "user_name", "status").
     From("users").
     Where("status = #{status}", 1).
@@ -84,7 +83,7 @@ err := session.NewStdPostgres(db).
 
 ### 4. Query
 
-The following examples use the GORM provider for brevity. For `database/sql`, keep the chain the same and swap the constructor to `session.NewStdMySQL(...)`, `session.NewStdPostgres(...)`, or `session.NewStd(...)`.
+The following examples use the GORM provider for brevity. For `database/sql`, keep the chain the same and swap the constructor to `mysql.NewSession(...)`, `postgres.NewSession(...)`, or the lower-level `session.NewStd(...)`.
 
 ```go
 type User struct {
@@ -186,7 +185,7 @@ err := session.NewGorm(db).
 Use `ExecResult()` when the provider/database can expose `LastInsertID` style metadata:
 
 ```go
-result, err := session.NewStdMySQL(db).
+result, err := mysql.NewSession(db).
     InsertInto("users").
     Values("user_name", "alice").
     ExecResult()
@@ -203,7 +202,7 @@ type InsertedID struct {
 }
 
 var inserted []InsertedID
-err := session.NewStdPostgres(db).
+err := postgres.NewSession(db).
     InsertInto("users").
     IntoColumns("user_name", "status").
     IntoMultiValues([][]any{

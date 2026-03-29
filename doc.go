@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package sqlcraft provides a MyBatis-style fluent SQL builder for Go, built on top of GORM.
+// Package sqlcraft provides a MyBatis-style fluent SQL builder for Go with pluggable execution providers.
 //
 // It offers three layers:
 //

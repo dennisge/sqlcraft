@@ -15,7 +15,16 @@
 // Package driver provides helpers for initializing GORM database connections.
 package driver
 
-import "time"
+import (
+	"errors"
+	"strings"
+	"time"
+)
+
+var (
+	// ErrDSNRequired reports that a database DSN was not provided.
+	ErrDSNRequired = errors.New("driver: dsn is required")
+)
 
 // Config holds database connection pool settings.
 type Config struct {
@@ -37,6 +46,9 @@ type Config struct {
 
 // SetDefaults fills zero-valued fields with sensible defaults.
 func (c *Config) SetDefaults() {
+	if c == nil {
+		return
+	}
 	if c.MaxOpen == 0 {
 		c.MaxOpen = 25
 	}
@@ -49,4 +61,23 @@ func (c *Config) SetDefaults() {
 	if c.ConnMaxIdleTime == 0 {
 		c.ConnMaxIdleTime = 3 * time.Minute
 	}
+}
+
+// Validate ensures the config contains the required database settings.
+func (c *Config) Validate() error {
+	if c == nil || strings.TrimSpace(c.DSN) == "" {
+		return ErrDSNRequired
+	}
+	return nil
+}
+
+// NormalizeConfig returns a copy of cfg with defaults applied.
+// A nil cfg is treated as an empty config.
+func NormalizeConfig(cfg *Config) *Config {
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	normalized := *cfg
+	normalized.SetDefaults()
+	return &normalized
 }
