@@ -22,6 +22,7 @@ import (
 	"io"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -215,6 +216,428 @@ func TestAppendRebindsConflictingPlaceholders(t *testing.T) {
 	}
 	if !reflect.DeepEqual(argMap["#{id_0}"], 2) {
 		t.Fatalf("argMap[#{id_0}] = %#v, want 2", argMap["#{id_0}"])
+	}
+}
+
+func TestAppendRawSelectiveSkipsZeroCondition(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("FOR UPDATE", false)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users")
+	}
+}
+
+func TestAppendRawSelectiveAppendsWhenConditionMatches(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("FOR UPDATE", true)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users FOR UPDATE" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users FOR UPDATE")
+	}
+}
+
+func TestAppendRawSelectiveSupportsPresentFalseGate(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("FOR UPDATE", Present(false))
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users FOR UPDATE" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users FOR UPDATE")
+	}
+}
+
+func TestAppendRawSelectiveBindsNamedFieldsWhenAllPresent(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		UserName string `db:"user_name"`
+		Status   int
+	}{
+		UserName: "alice",
+		Status:   1,
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE user_name = #{user_name} AND status = #{status}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE user_name = #{user_name} AND status = #{status}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap["#{user_name}"], "alice") {
+		t.Fatalf("argMap[#{user_name}] = %#v, want %q", snap.argMap["#{user_name}"], "alice")
+	}
+	if !reflect.DeepEqual(snap.argMap["#{status}"], 1) {
+		t.Fatalf("argMap[#{status}] = %#v, want 1", snap.argMap["#{status}"])
+	}
+}
+
+func TestAppendRawSelectivePrunesNamedConditionWhenValueMissing(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		UserName string `db:"user_name"`
+		Status   int
+	}{
+		UserName: "alice",
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE user_name = #{user_name} AND status = #{status}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.err != nil {
+		t.Fatalf("snapshot.err = %v, want nil", snap.err)
+	}
+	if snap.sqlText != "SELECT id\nFROM users WHERE user_name = #{user_name}" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users WHERE user_name = #{user_name}")
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{user_name}": "alice"}) {
+		t.Fatalf("argMap = %#v, want %#v", snap.argMap, map[string]any{"#{user_name}": "alice"})
+	}
+}
+
+func TestAppendRawSelectiveBindsPositionalArgsWhenAllPresent(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE status = #{status} AND role = #{role}", 1, "admin")
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE status = #{status} AND role = #{role}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap["#{status}"], 1) {
+		t.Fatalf("argMap[#{status}] = %#v, want 1", snap.argMap["#{status}"])
+	}
+	if !reflect.DeepEqual(snap.argMap["#{role}"], "admin") {
+		t.Fatalf("argMap[#{role}] = %#v, want %q", snap.argMap["#{role}"], "admin")
+	}
+}
+
+func TestAppendRawSelectivePrunesPositionalConditionWhenValueMissing(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE status = #{status} AND role = #{role}", 1, "")
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.err != nil {
+		t.Fatalf("snapshot.err = %v, want nil", snap.err)
+	}
+	if snap.sqlText != "SELECT id\nFROM users WHERE status = #{status}" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users WHERE status = #{status}")
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{status}": 1}) {
+		t.Fatalf("argMap = %#v, want %#v", snap.argMap, map[string]any{"#{status}": 1})
+	}
+}
+
+func TestAppendRawSelectivePrunesOnlyMissingNamedBranches(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := map[string]any{
+		"b": "two",
+		"c": "three",
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE a = #{a} AND b = #{b} OR c = #{c}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.err != nil {
+		t.Fatalf("snapshot.err = %v, want nil", snap.err)
+	}
+	if snap.sqlText != "SELECT id\nFROM users WHERE b = #{b} OR c = #{c}" {
+		t.Fatalf("sqlText = %q, want %q", snap.sqlText, "SELECT id\nFROM users WHERE b = #{b} OR c = #{c}")
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{b}": "two", "#{c}": "three"}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestWhereSelectiveSupportsPresentZeroValue(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		WhereSelective("status = #{status}", Present(0))
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users\nWHERE (status = #{status})" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{status}": 0}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestSetSelectiveSupportsPresentFalseValue(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Update("users").
+		SetSelective("enabled", Present(false))
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "UPDATE users\nSET enabled = #{enabled_0}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{enabled_0}": false}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestValuesSelectiveSupportsPresentNilValue(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		InsertInto("users").
+		ValuesSelective("deleted_at", Present[any](nil))
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "INSERT INTO users\n (deleted_at)\nVALUES (#{deleted_at_0})" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	value, ok := snap.argMap["#{deleted_at_0}"]
+	if !ok {
+		t.Fatalf("argMap = %#v, want deleted_at placeholder", snap.argMap)
+	}
+	if value != nil {
+		t.Fatalf("argMap[#{deleted_at_0}] = %#v, want nil", value)
+	}
+}
+
+func TestAddParamSelectiveSupportsPresentEmptyString(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AddParamSelective("user_name", Present("")).
+		AppendRaw("WHERE user_name = #{user_name}")
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE user_name = #{user_name}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{user_name}": ""}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestAppendRawSelectiveSupportsPresentZeroValue(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE status = #{status}", Present(0))
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE status = #{status}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{status}": 0}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestAppendRawSelectivePrunesPresentNullOptional(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		Status Optional[*int]
+		Name   string
+	}{
+		Status: Present[*int](nil),
+		Name:   "alice",
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective("WHERE status = #{status} AND name = #{name}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE name = #{name}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{name}": "alice"}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestAppendRawSelectiveKeepsBetweenClauseIntact(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawSelective(
+			"WHERE created_at BETWEEN #{from} AND #{to} AND status = #{status}",
+			"2024-01-01",
+			"2024-02-01",
+			"",
+		)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.err != nil {
+		t.Fatalf("snapshot.err = %v, want nil", snap.err)
+	}
+	if snap.sqlText != "SELECT id\nFROM users WHERE created_at BETWEEN #{from} AND #{to}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{from}": "2024-01-01", "#{to}": "2024-02-01"}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestAppendRawNamedUnwrapsPresentOptionalFields(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		Status Optional[int]
+	}{
+		Status: Present(0),
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawNamed("WHERE status = #{status}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE status = #{status}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap, map[string]any{"#{status}": 0}) {
+		t.Fatalf("argMap = %#v", snap.argMap)
+	}
+}
+
+func TestAppendRawNamedRejectsAbsentOptionalFields(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		Status Optional[int]
+	}{
+		Status: Absent[int](),
+	}
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawNamed("WHERE status = #{status}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.err == nil {
+		t.Fatal("snapshot.err = nil, want error")
+	}
+	if !strings.Contains(snap.err.Error(), "missing named value for placeholder #{status}") {
+		t.Fatalf("snapshot.err = %v", snap.err)
+	}
+}
+
+func TestAppendRawNamedBindsStructFields(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	filter := struct {
+		UserName string `db:"user_name"`
+		Status   int
+	}{
+		UserName: "alice",
+		Status:   1,
+	}
+
+	session := NewStdPostgres(db).
+		Select("id").
+		From("users").
+		AppendRawNamed("WHERE user_name = #{user_name} AND status = #{status}", filter)
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if snap.sqlText != "SELECT id\nFROM users WHERE user_name = #{user_name} AND status = #{status}" {
+		t.Fatalf("sqlText = %q", snap.sqlText)
+	}
+	if !reflect.DeepEqual(snap.argMap["#{user_name}"], "alice") {
+		t.Fatalf("argMap[#{user_name}] = %#v, want %q", snap.argMap["#{user_name}"], "alice")
+	}
+	if !reflect.DeepEqual(snap.argMap["#{status}"], 1) {
+		t.Fatalf("argMap[#{status}] = %#v, want 1", snap.argMap["#{status}"])
+	}
+}
+
+func TestAppendRawNamedBindsMapKeysCaseInsensitively(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).
+		Select("id").
+		From("users").
+		AppendRawNamed("WHERE user_name = #{user_name}", map[string]any{"USER_NAME": "alice"})
+
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+	if !reflect.DeepEqual(snap.argMap["#{user_name}"], "alice") {
+		t.Fatalf("argMap[#{user_name}] = %#v, want %q", snap.argMap["#{user_name}"], "alice")
+	}
+}
+
+func TestAppendRawNamedRejectsUnsupportedSource(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	session := NewStdMySQL(db).AppendRawNamed("WHERE id = #{id}", 1)
+	snap := session.(interface{ snapshot() sessionSnapshot }).snapshot()
+
+	if snap.err == nil {
+		t.Fatal("snapshot.err = nil, want error")
+	}
+	if !strings.Contains(snap.err.Error(), "named arg source must be a struct or map with string keys") {
+		t.Fatalf("snapshot.err = %v", snap.err)
 	}
 }
 

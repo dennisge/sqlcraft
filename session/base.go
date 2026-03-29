@@ -78,10 +78,14 @@ func (s *baseSession) Where(condition string, args ...any) Session {
 }
 
 func (s *baseSession) WhereSelective(condition string, arg any) Session {
-	if !isNotZero(arg) {
+	if _, present, null, wrapped := unwrapSelectivePresence(arg); wrapped && present && null {
 		return s.current()
 	}
-	if err := s.fillArgValue(condition, arg); err != nil {
+	value, include := selectiveValueState(arg)
+	if !include {
+		return s.current()
+	}
+	if err := s.fillArgValue(condition, value); err != nil {
 		s.err = sessionWrapError("where selective", err)
 		return s.current()
 	}
@@ -163,8 +167,9 @@ func (s *baseSession) Values(column string, value any) Session {
 }
 
 func (s *baseSession) ValuesSelective(column string, value any) Session {
-	if isNotZero(value) {
-		s.sql.Values(column, s.newDynamicPlaceholder(column, value))
+	actual, include := selectiveValueState(value)
+	if include {
+		s.sql.Values(column, s.newDynamicPlaceholder(column, actual))
 	}
 	return s.current()
 }
@@ -211,8 +216,9 @@ func (s *baseSession) Set(column string, value any) Session {
 }
 
 func (s *baseSession) SetSelective(column string, value any) Session {
-	if isNotZero(value) {
-		s.sql.Set(column + " = " + s.newDynamicPlaceholder(column, value))
+	actual, include := selectiveValueState(value)
+	if include {
+		s.sql.Set(column + " = " + s.newDynamicPlaceholder(column, actual))
 	}
 	return s.current()
 }
@@ -228,7 +234,8 @@ func (s *baseSession) InnerJoin(joins ...string) Session {
 }
 
 func (s *baseSession) InnerJoinSelective(join string, condition any) Session {
-	if isNotZero(condition) {
+	_, include := selectiveValueState(condition)
+	if include {
 		s.sql.InnerJoin(join)
 	}
 	return s.current()
@@ -282,10 +289,11 @@ func (s *baseSession) AddParam(param string, value any) Session {
 }
 
 func (s *baseSession) AddParamSelective(param string, value any) Session {
-	if !isNotZero(value) {
+	actual, include := selectiveValueState(value)
+	if !include {
 		return s.current()
 	}
-	if err := s.bindPlaceholder(normalizeParam(param), value); err != nil {
+	if err := s.bindPlaceholder(normalizeParam(param), actual); err != nil {
 		s.err = sessionWrapError("add param selective", err)
 	}
 	return s.current()
@@ -297,6 +305,77 @@ func (s *baseSession) AppendRaw(rawSQL string, args ...any) Session {
 			s.err = err
 			return s.current()
 		}
+	}
+	s.rawSQL = append(s.rawSQL, rawSQL)
+	return s.current()
+}
+
+func (s *baseSession) AppendRawSelective(rawSQL string, arg any, args ...any) Session {
+	placeholders := getPlaceholders(rawSQL)
+	if len(placeholders) == 0 {
+		_, include := selectiveValueState(arg)
+		if !include {
+			return s.current()
+		}
+		s.rawSQL = append(s.rawSQL, rawSQL)
+		return s.current()
+	}
+
+	values := append([]any{arg}, args...)
+	if len(values) == 1 && supportsNamedArgSource(arg) {
+		source, _, _, _ := unwrapSelectivePresence(arg)
+		if source == nil {
+			source = arg
+		}
+		prunedSQL, shouldAppend, err := pruneNamedSelectiveSQL(rawSQL, source)
+		if err != nil {
+			s.err = err
+			return s.current()
+		}
+		if !shouldAppend {
+			return s.current()
+		}
+		if err := s.bindNamedArgs(prunedSQL, source, "append raw selective"); err != nil {
+			s.err = err
+			return s.current()
+		}
+		s.rawSQL = append(s.rawSQL, prunedSQL)
+		return s.current()
+	}
+
+	if len(values) == 1 {
+		value, include := selectiveValueState(arg)
+		if !include {
+			return s.current()
+		}
+		if err := s.fillArgValue(rawSQL, value); err != nil {
+			s.err = sessionWrapError("append raw selective", err)
+			return s.current()
+		}
+		s.rawSQL = append(s.rawSQL, rawSQL)
+		return s.current()
+	}
+
+	prunedSQL, keptArgs, shouldAppend, err := prunePositionalSelectiveSQL(rawSQL, values)
+	if err != nil {
+		s.err = err
+		return s.current()
+	}
+	if !shouldAppend {
+		return s.current()
+	}
+	if err := s.bindArgs(prunedSQL, keptArgs, "append raw selective"); err != nil {
+		s.err = err
+		return s.current()
+	}
+	s.rawSQL = append(s.rawSQL, prunedSQL)
+	return s.current()
+}
+
+func (s *baseSession) AppendRawNamed(rawSQL string, arg any) Session {
+	if err := s.bindNamedArgs(rawSQL, arg, "append raw named"); err != nil {
+		s.err = err
+		return s.current()
 	}
 	s.rawSQL = append(s.rawSQL, rawSQL)
 	return s.current()

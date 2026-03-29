@@ -31,6 +31,12 @@ package session
 
 import "database/sql"
 
+// Use [Present], [Absent], or [Maybe] with Selective methods when zero values
+// such as 0, false, "", or nil must still be treated as explicitly provided.
+//
+//	Tx.WhereSelective("status = #{status}", Present(0))
+//	Tx.AppendRawSelective("AND deleted_at IS NULL", Present(true))
+//
 // TxFunc is the callback type for [Session.Transaction].
 type TxFunc func(session Session) error
 
@@ -61,7 +67,9 @@ type Session interface {
 	// Where adds a WHERE condition. Placeholders in condition are bound to args.
 	Where(condition string, args ...any) Session
 
-	// WhereSelective adds a WHERE condition only when arg is non-zero.
+	// WhereSelective adds a WHERE condition only when arg is non-zero or explicitly present via [Present].
+	// Explicit null optionals are pruned instead of producing "= NULL"; use an explicit
+	// raw "IS NULL" or "IS NOT NULL" predicate when that SQL semantics is needed.
 	WhereSelective(condition string, arg any) Session
 
 	// WhereIn adds a WHERE column IN (...) condition when args is non-empty.
@@ -95,7 +103,7 @@ type Session interface {
 	// Values adds a column-value pair for INSERT.
 	Values(column string, value any) Session
 
-	// ValuesSelective adds a column-value pair only when value is non-zero.
+	// ValuesSelective adds a column-value pair only when value is non-zero or explicitly present via [Present].
 	ValuesSelective(column string, value any) Session
 
 	// IntoColumns sets column names for bulk INSERT.
@@ -115,7 +123,7 @@ type Session interface {
 	// Set adds a column = value assignment for UPDATE.
 	Set(column string, value any) Session
 
-	// SetSelective adds a SET assignment only when value is non-zero.
+	// SetSelective adds a SET assignment only when value is non-zero or explicitly present via [Present].
 	SetSelective(column string, value any) Session
 
 	// ---- DELETE ----
@@ -128,7 +136,7 @@ type Session interface {
 	// InnerJoin adds an INNER JOIN clause.
 	InnerJoin(joins ...string) Session
 
-	// InnerJoinSelective adds an INNER JOIN only when condition is non-zero.
+	// InnerJoinSelective adds an INNER JOIN only when condition is non-zero or explicitly present via [Present].
 	InnerJoinSelective(join string, condition any) Session
 
 	// LeftOuterJoin adds a LEFT OUTER JOIN clause.
@@ -167,13 +175,30 @@ type Session interface {
 	// ${param} is injected literally — use ONLY for trusted column/table names.
 	AddParam(param string, value any) Session
 
-	// AddParamSelective binds a parameter only when value is non-zero.
+	// AddParamSelective binds a parameter only when value is non-zero or explicitly present via [Present].
 	AddParamSelective(param string, value any) Session
 
 	// ---- RAW SQL ----
 
 	// AppendRaw appends raw SQL text after the builder-generated SQL.
+	// When args are provided, placeholders are bound positionally in declaration order.
 	AppendRaw(rawSQL string, args ...any) Session
+
+	// AppendRawSelective appends raw SQL only when the required values are present.
+	// With placeholders, values can come from positional args or a single struct/map source.
+	// Boolean sub-conditions joined by AND/OR are pruned individually when their values are missing,
+	// while predicates such as "BETWEEN ... AND ..." remain intact as one clause.
+	// Use [Present] to keep zero values such as 0, false, "", or nil.
+	// Explicit null optionals prune the corresponding predicate; use explicit "IS NULL"
+	// SQL when you want to query for SQL null values.
+	// Without placeholders, arg acts as a simple condition gate.
+	AppendRawSelective(rawSQL string, arg any, args ...any) Session
+
+	// AppendRawNamed appends raw SQL and strictly binds placeholders from a struct or map by placeholder name.
+	// Missing values are treated as errors instead of skipping the fragment.
+	// Explicitly present nil/null values are bound as SQL NULL, so callers should write
+	// "IS NULL" themselves instead of relying on equality comparisons.
+	AppendRawNamed(rawSQL string, arg any) Session
 
 	// Append appends another Session's SQL to this one.
 	Append(sql Session) Session
