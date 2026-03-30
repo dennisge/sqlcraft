@@ -8,6 +8,8 @@ once tagged releases begin.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-03-30
+
 ### Added
 
 - Pluggable execution providers for both GORM and native `database/sql`.
