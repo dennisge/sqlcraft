@@ -14,6 +14,27 @@ once tagged releases begin.
 
 ### Fixed
 
+## [0.2.0] - 2026-03-30
+
+### Added
+
+- `WithContext(ctx)` and `TransactionContext(ctx, ...)` for request-scoped queries and transactions.
+- Provider-controlled `NewTxSession(tx)` helpers for native `database/sql` transactions in the MySQL and PostgreSQL driver packages.
+- Expanded transaction coverage in unit tests and real-database live checks for commit and rollback behavior.
+- Production-oriented wiring examples and a release workflow guide in the documentation.
+
+### Changed
+
+- Simplified the recommended transaction usage in the README to prefer `session.Transaction(...)` and provider-specific control only when needed.
+- Preserved session debug/context state when entering callback-based transactions.
+- Improved API documentation around request DTO usage, provider wiring, and transaction behavior.
+
+### Fixed
+
+- Corrected GORM-backed transaction execution so MySQL inserts no longer escape the active transaction when collecting generated IDs.
+- Added panic-safe rollback handling for the `database/sql` transaction path.
+- Propagated execution context through native `database/sql` queries, execs, and transaction begin calls.
+
 ## [0.1.0] - 2026-03-30
 
 ### Added
