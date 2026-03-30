@@ -56,6 +56,7 @@ type Builder interface {
 	FetchFirstRowsOnly(limit string)
 	OffsetRows(offset string)
 	Returning(columns ...string)
+	Clone() Builder
 	String() string
 }
 
@@ -193,6 +194,10 @@ func (b *builder) OffsetRows(offset string) {
 
 func (b *builder) Returning(columns ...string) {
 	b.stmt.returning = append(b.stmt.returning, columns...)
+}
+
+func (b *builder) Clone() Builder {
+	return &builder{stmt: b.stmt.clone()}
 }
 
 func (b *builder) String() string {

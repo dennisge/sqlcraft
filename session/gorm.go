@@ -15,7 +15,9 @@
 package session
 
 import (
+	"context"
 	"database/sql"
+	"reflect"
 	"strings"
 
 	"gorm.io/gorm"
@@ -30,7 +32,7 @@ type gormBackend struct {
 	db *gorm.DB
 }
 
-func (b *gormBackend) scan(sqlText string, argMap map[string]any, debug bool, dest any) error {
+func (b *gormBackend) scan(ctx context.Context, sqlText string, argMap map[string]any, debug bool, dest any) error {
 	query, args, err := renderSQL(sqlText, argMap, func(name string, value any, _ int) (string, any, error) {
 		return "@" + name, sql.Named(name, value), nil
 	})
@@ -39,13 +41,16 @@ func (b *gormBackend) scan(sqlText string, argMap map[string]any, debug bool, de
 	}
 
 	db := b.db
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
 	if debug {
 		db = db.Debug()
 	}
 	return db.Raw(query, args...).Scan(dest).Error
 }
 
-func (b *gormBackend) execResult(sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error) {
+func (b *gormBackend) execResult(ctx context.Context, sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error) {
 	query, args, err := renderSQL(sqlText, argMap, func(name string, value any, _ int) (string, any, error) {
 		return "@" + name, sql.Named(name, value), nil
 	})
@@ -54,8 +59,11 @@ func (b *gormBackend) execResult(sqlText string, argMap map[string]any, debug bo
 	}
 
 	result := ExecutionResult{}
-	err = b.db.Connection(func(tx *gorm.DB) error {
+	execOn := func(tx *gorm.DB) error {
 		db := tx
+		if ctx != nil {
+			db = db.WithContext(ctx)
+		}
 		if debug {
 			db = db.Debug()
 		}
@@ -64,16 +72,30 @@ func (b *gormBackend) execResult(sqlText string, argMap map[string]any, debug bo
 			return execResult.Error
 		}
 		result.RowsAffected = execResult.RowsAffected
-		return b.fillLastInsertID(tx, query, &result)
-	})
+		return b.fillLastInsertID(db, query, &result)
+	}
+
+	db := b.db
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
+	if isTransactionalGormDB(db) {
+		err = execOn(db)
+	} else {
+		err = db.Connection(execOn)
+	}
 	if err != nil {
 		return ExecutionResult{}, err
 	}
 	return result, nil
 }
 
-func (b *gormBackend) transaction(fc func(sessionBackend) error, opts ...*sql.TxOptions) error {
-	return b.db.Transaction(func(tx *gorm.DB) error {
+func (b *gormBackend) transaction(ctx context.Context, fc func(sessionBackend) error, opts ...*sql.TxOptions) error {
+	db := b.db
+	if ctx != nil {
+		db = db.WithContext(ctx)
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
 		return fc(&gormBackend{db: tx})
 	}, opts...)
 }
@@ -139,4 +161,23 @@ func (s *GormSession) InsertSelective(table string, model any) (int64, error) {
 func isInsertStatement(query string) bool {
 	normalized := strings.TrimSpace(strings.ToUpper(query))
 	return strings.HasPrefix(normalized, "INSERT ")
+}
+
+func isTransactionalGormDB(db *gorm.DB) bool {
+	if db == nil || db.Statement == nil || db.Statement.ConnPool == nil {
+		return false
+	}
+
+	committer, ok := db.Statement.ConnPool.(gorm.TxCommitter)
+	if !ok || committer == nil {
+		return false
+	}
+
+	value := reflect.ValueOf(committer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }

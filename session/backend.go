@@ -133,6 +133,11 @@ func NewStd(db *sql.DB, dialect Dialect) Session {
 	return newSessionForBackend(&stdBackend{db: db, dialect: dialect})
 }
 
+// NewStdTx creates a new [Session] backed by an existing database/sql transaction.
+func NewStdTx(tx *sql.Tx, dialect Dialect) Session {
+	return newSessionForBackend(&stdBackend{tx: tx, dialect: dialect})
+}
+
 // NewStdMySQL creates a new database/sql-backed [Session] using MySQL placeholders.
 func NewStdMySQL(db *sql.DB) Session {
 	return NewStd(db, DialectMySQL)

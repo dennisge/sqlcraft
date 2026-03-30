@@ -666,6 +666,159 @@ func TestStdTransactionCommits(t *testing.T) {
 	}
 }
 
+func TestStdTxSessionUsesExistingTransaction(t *testing.T) {
+	db, state := openTestDB(t)
+	defer db.Close()
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+
+	_, err = NewStdTx(tx, DialectMySQL).
+		InsertInto("audit_logs").
+		Values("message", "created").
+		Exec()
+	if err != nil {
+		t.Fatalf("Exec() error = %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.beginCount != 1 {
+		t.Fatalf("beginCount = %d, want 1", state.beginCount)
+	}
+	if state.commitCount != 1 {
+		t.Fatalf("commitCount = %d, want 1", state.commitCount)
+	}
+	if state.rollbackCount != 0 {
+		t.Fatalf("rollbackCount = %d, want 0", state.rollbackCount)
+	}
+	if len(state.execCalls) != 1 {
+		t.Fatalf("execCalls = %d, want 1", len(state.execCalls))
+	}
+}
+
+func TestStdTxSessionRejectsNestedTransaction(t *testing.T) {
+	db, _ := openTestDB(t)
+	defer db.Close()
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	defer tx.Rollback()
+
+	err = NewStdTx(tx, DialectMySQL).Transaction(func(Session) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("Transaction() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "nested transactions are not supported") {
+		t.Fatalf("Transaction() error = %v", err)
+	}
+}
+
+func TestStdWithContextUsesQueryContext(t *testing.T) {
+	db, state := openTestDB(t)
+	defer db.Close()
+
+	ctx := context.WithValue(context.Background(), testContextKey{}, "scan-ctx")
+
+	var rows []struct {
+		ID int64 `db:"id"`
+	}
+	err := NewStdMySQL(db).
+		WithContext(ctx).
+		Select("id").
+		From("users").
+		Scan(&rows)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queryContextValues) != 1 {
+		t.Fatalf("queryContextValues len = %d, want 1", len(state.queryContextValues))
+	}
+	if state.queryContextValues[0] != "scan-ctx" {
+		t.Fatalf("queryContextValues[0] = %#v, want %q", state.queryContextValues[0], "scan-ctx")
+	}
+}
+
+func TestStdTransactionContextUsesBeginTxContext(t *testing.T) {
+	db, state := openTestDB(t)
+	defer db.Close()
+
+	ctx := context.WithValue(context.Background(), testContextKey{}, "tx-ctx")
+
+	err := NewStdMySQL(db).TransactionContext(ctx, func(tx Session) error {
+		_, err := tx.InsertInto("audit_logs").Values("message", "created").Exec()
+		return err
+	})
+	if err != nil {
+		t.Fatalf("TransactionContext() error = %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.beginContextValues) != 1 {
+		t.Fatalf("beginContextValues len = %d, want 1", len(state.beginContextValues))
+	}
+	if state.beginContextValues[0] != "tx-ctx" {
+		t.Fatalf("beginContextValues[0] = %#v, want %q", state.beginContextValues[0], "tx-ctx")
+	}
+	if len(state.execContextValues) != 1 {
+		t.Fatalf("execContextValues len = %d, want 1", len(state.execContextValues))
+	}
+	if state.execContextValues[0] != "tx-ctx" {
+		t.Fatalf("execContextValues[0] = %#v, want %q", state.execContextValues[0], "tx-ctx")
+	}
+}
+
+func TestStdTransactionRollsBackOnPanic(t *testing.T) {
+	db, state := openTestDB(t)
+	defer db.Close()
+
+	panicErr := errors.New("boom")
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("panic = nil, want propagated panic")
+		}
+		recoveredErr, ok := recovered.(error)
+		if !ok || !errors.Is(recoveredErr, panicErr) {
+			t.Fatalf("panic = %#v, want %v", recovered, panicErr)
+		}
+
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if state.beginCount != 1 {
+			t.Fatalf("beginCount = %d, want 1", state.beginCount)
+		}
+		if state.commitCount != 0 {
+			t.Fatalf("commitCount = %d, want 0", state.commitCount)
+		}
+		if state.rollbackCount != 1 {
+			t.Fatalf("rollbackCount = %d, want 1", state.rollbackCount)
+		}
+	}()
+
+	_ = NewStdMySQL(db).Transaction(func(tx Session) error {
+		_, err := tx.InsertInto("audit_logs").Values("message", "created").Exec()
+		if err != nil {
+			t.Fatalf("Exec() error = %v", err)
+		}
+		panic(panicErr)
+	})
+}
+
 type testCall struct {
 	query string
 	args  []any
@@ -677,6 +830,9 @@ type testDriverState struct {
 	queryRows           [][]driver.Value
 	queryCalls          []testCall
 	execCalls           []testCall
+	queryContextValues  []any
+	execContextValues   []any
+	beginContextValues  []any
 	execRowsAffected    int64
 	execLastInsertID    int64
 	supportLastInsertID bool
@@ -744,6 +900,8 @@ type testConn struct {
 	state *testDriverState
 }
 
+type testContextKey struct{}
+
 func (c *testConn) Prepare(string) (driver.Stmt, error) {
 	return nil, driver.ErrSkip
 }
@@ -756,16 +914,18 @@ func (c *testConn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
 
-func (c *testConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+func (c *testConn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
 	c.state.mu.Lock()
 	c.state.beginCount++
+	c.state.beginContextValues = append(c.state.beginContextValues, contextMarker(ctx))
 	c.state.mu.Unlock()
 	return &testTx{state: c.state}, nil
 }
 
-func (c *testConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+func (c *testConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.state.mu.Lock()
 	c.state.queryCalls = append(c.state.queryCalls, testCall{query: query, args: namedValuesToAny(args)})
+	c.state.queryContextValues = append(c.state.queryContextValues, contextMarker(ctx))
 	columns := append([]string(nil), c.state.queryColumns...)
 	rows := cloneDriverRows(c.state.queryRows)
 	c.state.mu.Unlock()
@@ -773,10 +933,11 @@ func (c *testConn) QueryContext(_ context.Context, query string, args []driver.N
 	return &testRows{columns: columns, rows: rows}, nil
 }
 
-func (c *testConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+func (c *testConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.state.mu.Lock()
 	defer c.state.mu.Unlock()
 	c.state.execCalls = append(c.state.execCalls, testCall{query: query, args: namedValuesToAny(args)})
+	c.state.execContextValues = append(c.state.execContextValues, contextMarker(ctx))
 	return testResult{
 		rowsAffected:        c.state.execRowsAffected,
 		lastInsertID:        c.state.execLastInsertID,
@@ -831,6 +992,13 @@ func namedValuesToAny(args []driver.NamedValue) []any {
 		values[i] = arg.Value
 	}
 	return values
+}
+
+func contextMarker(ctx context.Context) any {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Value(testContextKey{})
 }
 
 func assertIntArgs(t *testing.T, got []any, want ...int64) {

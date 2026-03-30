@@ -22,14 +22,17 @@
 //   - GORM: use [New] or [NewGorm] to create a GORM-backed session
 //   - database/sql (MySQL): use [NewStdMySQL] to create a stdlib MySQL session
 //   - database/sql (PostgreSQL): use [NewStdPostgres] to create a stdlib PostgreSQL session
-//   - database/sql (generic): use [NewStd] with an explicit [Dialect]
+//   - database/sql (generic): use [NewStd] or [NewStdTx] with an explicit [Dialect]
 //
 // When you already know the database package at compile time, prefer the
 // provider-specific helpers in [github.com/dennisge/sqlcraft/driver/mysql] or
 // [github.com/dennisge/sqlcraft/driver/postgres], such as OpenSession or NewSession.
 package session
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 // Use [Present], [Absent], or [Maybe] with Selective methods when zero values
 // such as 0, false, "", or nil must still be treated as explicitly provided.
@@ -49,7 +52,7 @@ type TxFunc func(session Session) error
 //
 // Session is backend-agnostic — the same interface works with GORM, database/sql
 // for MySQL, or database/sql for PostgreSQL. Use [New], [NewGorm], [NewStd],
-// [NewStdMySQL], or [NewStdPostgres] to create an appropriate implementation.
+// [NewStdTx], [NewStdMySQL], or [NewStdPostgres] to create an appropriate implementation.
 // For application code, the provider-specific helper packages usually offer a
 // cleaner entry point because they can encode the dialect in the package API.
 type Session interface {
@@ -208,6 +211,9 @@ type Session interface {
 	// Renew creates a fresh Session sharing the same database connection and dialect.
 	Renew() Session
 
+	// WithContext returns a cloned Session that uses ctx for subsequent execution and transactions.
+	WithContext(ctx context.Context) Session
+
 	// Debug enables SQL logging for the next terminal operation.
 	Debug() Session
 
@@ -223,5 +229,12 @@ type Session interface {
 	ExecResult() (ExecutionResult, error)
 
 	// Transaction executes fc within a database transaction.
+	// Nested transaction behavior follows the provider: GORM may use savepoints,
+	// while the database/sql provider rejects nested transactions.
 	Transaction(fc TxFunc, opts ...*sql.TxOptions) error
+
+	// TransactionContext executes fc within a database transaction that begins with ctx.
+	// Nested transaction behavior follows the provider: GORM may use savepoints,
+	// while the database/sql provider rejects nested transactions.
+	TransactionContext(ctx context.Context, fc TxFunc, opts ...*sql.TxOptions) error
 }

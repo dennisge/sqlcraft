@@ -137,6 +137,8 @@ Treat `*gorm.DB` and `*sql.DB` as long-lived application dependencies, and creat
 
 ```go
 import (
+    "context"
+
     "github.com/dennisge/sqlcraft/driver"
     mysqlhelper "github.com/dennisge/sqlcraft/driver/mysql"
     "github.com/dennisge/sqlcraft/session"
@@ -167,9 +169,10 @@ type UserRepo struct {
     db *AppDB
 }
 
-func (r *UserRepo) List(status session.Optional[int]) ([]User, error) {
+func (r *UserRepo) List(ctx context.Context, status session.Optional[int]) ([]User, error) {
     var users []User
     err := r.db.SQL().
+        WithContext(ctx).
         Select("id", "user_name", "status").
         From("users").
         WhereSelective("status = #{status}", status).
@@ -177,17 +180,19 @@ func (r *UserRepo) List(status session.Optional[int]) ([]User, error) {
     return users, err
 }
 
-func (r *UserRepo) InTx(fn func(sess session.Session) error) error {
-    return r.db.Gorm.Transaction(func(tx *gorm.DB) error {
-        return fn(mysqlhelper.NewGormSession(tx))
-    })
+func (r *UserRepo) InTx(ctx context.Context, fn func(sess session.Session) error) error {
+    return r.db.SQL().TransactionContext(ctx, fn)
 }
 ```
+
+Prefer `r.db.SQL().WithContext(ctx)` for request-scoped queries and `r.db.SQL().TransactionContext(ctx, ...)` for request-scoped transactions.
+If the same transaction must also call direct GORM APIs, keep `r.db.Gorm` and wrap the transaction handle with `mysqlhelper.NewGormSession(gtx)` only at that point.
 
 #### `database/sql`-backed application
 
 ```go
 import (
+    "context"
     "database/sql"
 
     "github.com/dennisge/sqlcraft/driver"
@@ -219,9 +224,10 @@ type UserRepo struct {
     db *AppDB
 }
 
-func (r *UserRepo) List(enabled session.Optional[bool]) ([]User, error) {
+func (r *UserRepo) List(ctx context.Context, enabled session.Optional[bool]) ([]User, error) {
     var users []User
     err := r.db.SQLSession().
+        WithContext(ctx).
         Select("id", "user_name", "enabled").
         From("users").
         WhereSelective("enabled = #{enabled}", enabled).
@@ -229,10 +235,13 @@ func (r *UserRepo) List(enabled session.Optional[bool]) ([]User, error) {
     return users, err
 }
 
-func (r *UserRepo) InTx(fn func(sess session.Session) error) error {
-    return r.db.SQLSession().Transaction(fn)
+func (r *UserRepo) InTx(ctx context.Context, fn func(sess session.Session) error) error {
+    return r.db.SQLSession().TransactionContext(ctx, fn)
 }
 ```
+
+Use `db.SQLSession().WithContext(ctx)` for request-scoped queries and `db.SQLSession().TransactionContext(ctx, ...)` as the default transaction entry point. Reach for `BeginTx(...)` plus
+`postgreshelper.NewTxSession(tx)` only when the same transaction must also execute raw `*sql.Tx` operations.
 
 This pattern keeps connection pools stable, avoids rebuilding dialect state on every call,
 and still gives each query a fresh fluent builder.
@@ -347,7 +356,7 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
     }
 
     var rows []userRow
-    err := h.sess.Renew().
+    err := h.sess.WithContext(r.Context()).
         Select("id", "user_name", "status", "enabled", "deleted_at").
         From("users").
         WhereSelective("status = #{status}", req.Status).
@@ -435,7 +444,7 @@ rows, err := sess.
 ```go
 import "github.com/dennisge/sqlcraft/session"
 
-err := sess.Transaction(func(tx session.Session) error {
+err := sess.TransactionContext(ctx, func(tx session.Session) error {
     _, err := tx.Update("accounts").
         Set("balance", 100).
         Where("id = #{id}", 1).
@@ -450,6 +459,36 @@ err := sess.Transaction(func(tx session.Session) error {
         Exec()
     return err
 })
+```
+
+Use `WithContext(ctx)` for normal request-scoped queries and `TransactionContext(ctx, ...)` when the transaction should respect request cancellation or deadlines.
+That is the recommended transaction entry point for both GORM-backed and `database/sql`-backed sessions.
+Nested transactions are still provider-specific: GORM can use savepoints, while `database/sql` sessions return an error on nested transactions.
+If you need provider-specific control inside the same transaction, wrap the provider transaction object into a session:
+
+```go
+err := gormDB.Transaction(func(gtx *gorm.DB) error {
+    _, err := mysqlhelper.NewGormSession(gtx).
+        InsertInto("audit_logs").
+        Values("message", "created").
+        Exec()
+    return err
+})
+```
+
+```go
+sqlTx, err := sqlDB.BeginTx(ctx, nil)
+if err != nil {
+    return err
+}
+defer sqlTx.Rollback()
+
+txSess := postgreshelper.NewTxSession(sqlTx)
+_, err = txSess.InsertInto("audit_logs").Values("message", "created").Exec()
+if err != nil {
+    return err
+}
+return sqlTx.Commit()
 ```
 
 ### Raw SQL Fragments

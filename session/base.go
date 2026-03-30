@@ -15,6 +15,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"reflect"
 	"strconv"
@@ -24,9 +25,9 @@ import (
 )
 
 type sessionBackend interface {
-	scan(sqlText string, argMap map[string]any, debug bool, dest any) error
-	execResult(sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error)
-	transaction(fc func(sessionBackend) error, opts ...*sql.TxOptions) error
+	scan(ctx context.Context, sqlText string, argMap map[string]any, debug bool, dest any) error
+	execResult(ctx context.Context, sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error)
+	transaction(ctx context.Context, fc func(sessionBackend) error, opts ...*sql.TxOptions) error
 	renew() sessionBackend
 }
 
@@ -42,6 +43,7 @@ type baseSession struct {
 	rawSQL   []string
 	backend  sessionBackend
 	self     Session
+	ctx      context.Context
 	debug    bool
 	err      error
 	paramSeq int
@@ -425,7 +427,16 @@ func (s *baseSession) Append(other Session) Session {
 }
 
 func (s *baseSession) Renew() Session {
-	return newSessionForBackend(s.backend.renew())
+	renewed := newSessionForBackend(s.backend.renew())
+	base := unwrapBaseSession(renewed)
+	base.ctx = s.ctx
+	return renewed
+}
+
+func (s *baseSession) WithContext(ctx context.Context) Session {
+	cloned := s.clone()
+	unwrapBaseSession(cloned).ctx = ctx
+	return cloned
 }
 
 func (s *baseSession) Debug() Session {
@@ -441,7 +452,7 @@ func (s *baseSession) Scan(dest any) error {
 	}
 	sqlText, argMap, debug := s.snapshotState()
 	s.Reset()
-	return s.backend.scan(sqlText, argMap, debug, dest)
+	return s.backend.scan(s.ctx, sqlText, argMap, debug, dest)
 }
 
 func (s *baseSession) Exec() (int64, error) {
@@ -460,7 +471,7 @@ func (s *baseSession) ExecResult() (ExecutionResult, error) {
 	}
 	sqlText, argMap, debug := s.snapshotState()
 	s.Reset()
-	return s.backend.execResult(sqlText, argMap, debug)
+	return s.backend.execResult(s.ctx, sqlText, argMap, debug)
 }
 
 func (s *baseSession) Transaction(fc TxFunc, opts ...*sql.TxOptions) error {
@@ -469,10 +480,20 @@ func (s *baseSession) Transaction(fc TxFunc, opts ...*sql.TxOptions) error {
 		s.Reset()
 		return err
 	}
+	ctx := s.ctx
+	debug := s.debug
 	s.Reset()
-	return s.backend.transaction(func(txBackend sessionBackend) error {
-		return fc(newSessionForBackend(txBackend))
+	return s.backend.transaction(ctx, func(txBackend sessionBackend) error {
+		txSession := newSessionForBackend(txBackend)
+		txBase := unwrapBaseSession(txSession)
+		txBase.ctx = ctx
+		txBase.debug = debug
+		return fc(txSession)
 	}, opts...)
+}
+
+func (s *baseSession) TransactionContext(ctx context.Context, fc TxFunc, opts ...*sql.TxOptions) error {
+	return s.WithContext(ctx).Transaction(fc, opts...)
 }
 
 func (s *baseSession) Reset() {
@@ -577,6 +598,42 @@ func cloneArgMap(src map[string]any) map[string]any {
 		dst[k] = v
 	}
 	return dst
+}
+
+func sessionContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func unwrapBaseSession(sess Session) *baseSession {
+	switch value := sess.(type) {
+	case *GormSession:
+		return value.baseSession
+	case *StdSession:
+		return value.baseSession
+	case *baseSession:
+		return value
+	default:
+		return nil
+	}
+}
+
+func (s *baseSession) clone() Session {
+	cloned := newSessionForBackend(s.backend.renew())
+	base := unwrapBaseSession(cloned)
+	base.sql = s.sql.Clone()
+	base.argMap = cloneArgMap(s.argMap)
+	if base.argMap == nil {
+		base.argMap = make(map[string]any)
+	}
+	base.rawSQL = append([]string(nil), s.rawSQL...)
+	base.ctx = s.ctx
+	base.debug = s.debug
+	base.err = s.err
+	base.paramSeq = s.paramSeq
+	return cloned
 }
 
 func normalizeParam(param string) string {

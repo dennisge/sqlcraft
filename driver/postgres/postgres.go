@@ -74,6 +74,11 @@ func NewSession(db *sql.DB) session.Session {
 	return session.NewStdPostgres(db)
 }
 
+// NewTxSession binds an existing database/sql transaction to a PostgreSQL-flavored sqlcraft session.
+func NewTxSession(tx *sql.Tx) session.Session {
+	return session.NewStdTx(tx, session.DialectPostgres)
+}
+
 // NewGormSession binds an existing GORM DB to a sqlcraft session.
 func NewGormSession(db *gorm.DB) session.Session {
 	return session.NewGorm(db)

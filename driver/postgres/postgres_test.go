@@ -29,6 +29,13 @@ func TestNewSessionReturnsStdSession(t *testing.T) {
 	}
 }
 
+func TestNewTxSessionReturnsStdSession(t *testing.T) {
+	got := NewTxSession(nil)
+	if _, ok := got.(*session.StdSession); !ok {
+		t.Fatalf("NewTxSession() type = %T, want *session.StdSession", got)
+	}
+}
+
 func TestNewGormSessionReturnsGormSession(t *testing.T) {
 	got := NewGormSession(nil)
 	if _, ok := got.(*session.GormSession); !ok {

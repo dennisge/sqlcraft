@@ -37,11 +37,11 @@ type stdBackend struct {
 }
 
 type sqlQueryExec interface {
-	Query(query string, args ...any) (*sql.Rows, error)
-	Exec(query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-func (b *stdBackend) scan(sqlText string, argMap map[string]any, debug bool, dest any) error {
+func (b *stdBackend) scan(ctx context.Context, sqlText string, argMap map[string]any, debug bool, dest any) error {
 	query, args, err := renderSQL(sqlText, argMap, func(_ string, value any, index int) (string, any, error) {
 		ph, err := b.dialect.placeholder(index)
 		return ph, value, err
@@ -53,7 +53,7 @@ func (b *stdBackend) scan(sqlText string, argMap map[string]any, debug bool, des
 		log.Printf("sqlcraft [%s] QUERY %s | args=%v", b.dialect, query, args)
 	}
 
-	rows, err := b.conn().Query(query, args...)
+	rows, err := b.conn().QueryContext(sessionContext(ctx), query, args...)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (b *stdBackend) scan(sqlText string, argMap map[string]any, debug bool, des
 	return rows.Err()
 }
 
-func (b *stdBackend) execResult(sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error) {
+func (b *stdBackend) execResult(ctx context.Context, sqlText string, argMap map[string]any, debug bool) (ExecutionResult, error) {
 	query, args, err := renderSQL(sqlText, argMap, func(_ string, value any, index int) (string, any, error) {
 		ph, err := b.dialect.placeholder(index)
 		return ph, value, err
@@ -77,7 +77,7 @@ func (b *stdBackend) execResult(sqlText string, argMap map[string]any, debug boo
 		log.Printf("sqlcraft [%s] EXEC %s | args=%v", b.dialect, query, args)
 	}
 
-	result, err := b.conn().Exec(query, args...)
+	result, err := b.conn().ExecContext(sessionContext(ctx), query, args...)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
@@ -95,17 +95,25 @@ func (b *stdBackend) execResult(sqlText string, argMap map[string]any, debug boo
 	return out, nil
 }
 
-func (b *stdBackend) transaction(fc func(sessionBackend) error, opts ...*sql.TxOptions) error {
+func (b *stdBackend) transaction(ctx context.Context, fc func(sessionBackend) error, opts ...*sql.TxOptions) error {
 	if b.tx != nil {
 		return errors.New("session: nested transactions are not supported for the database/sql provider")
 	}
 
-	tx, err := b.db.BeginTx(context.Background(), firstTxOptions(opts))
+	tx, err := b.db.BeginTx(sessionContext(ctx), firstTxOptions(opts))
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				panic(errors.Join(sessionErrorf("transaction panic: %v", recovered), rollbackErr))
+			}
+			panic(recovered)
+		}
+	}()
 
-	if err := fc(&stdBackend{tx: tx, dialect: b.dialect}); err != nil {
+	if err := fc(&stdBackend{db: b.db, tx: tx, dialect: b.dialect}); err != nil {
 		if rollbackErr := tx.Rollback(); rollbackErr != nil {
 			return errors.Join(err, rollbackErr)
 		}

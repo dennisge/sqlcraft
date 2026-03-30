@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -10,7 +11,11 @@ import (
 	sqldriver "github.com/dennisge/sqlcraft/driver"
 	mysqlhelper "github.com/dennisge/sqlcraft/driver/mysql"
 	postgreshelper "github.com/dennisge/sqlcraft/driver/postgres"
+	"github.com/dennisge/sqlcraft/session"
+	"gorm.io/gorm"
 )
+
+var errForceRollback = errors.New("force rollback")
 
 func main() {
 	log.SetFlags(0)
@@ -158,6 +163,10 @@ func runMySQL(cfg *sqldriver.Config) error {
 	derivedGormBatchIDs, _ := gormBatchResult.InsertIDs()
 	fmt.Printf("gorm Session.ExecResult batch  -> rowsAffected=%d, firstInsertID=%d, derivedIDs=%v, actualInsertedIDs=%v\n", gormBatchResult.RowsAffected, gormBatchResult.LastInsertID, derivedGormBatchIDs, gormBatchIDs)
 
+	if err := runMySQLTransactions(stdDB, gormDB); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -300,6 +309,10 @@ func runPostgres(cfg *sqldriver.Config) error {
 	}
 	fmt.Printf("gorm batch ... RETURNING       -> returnedIDs=%v\n", extractIDs(returningBatchGorm))
 
+	if err := runPostgresTransactions(stdDB, gormDB); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -348,6 +361,246 @@ func execAll(db *sql.DB, stmts []string) error {
 	return nil
 }
 
+func runMySQLTransactions(stdDB *sql.DB, gormDB *gorm.DB) error {
+	if err := mysqlhelper.NewSession(stdDB).Transaction(func(tx session.Session) error {
+		_, err := tx.InsertInto("exec_probe").Values("marker", "mysql-std-tx-commit").Values("note", "std tx commit").Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("mysql std tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-std-tx-commit", 1); err != nil {
+		return fmt.Errorf("mysql std tx commit verify: %w", err)
+	}
+
+	rollbackErr := mysqlhelper.NewSession(stdDB).Transaction(func(tx session.Session) error {
+		if _, err := tx.InsertInto("exec_probe").Values("marker", "mysql-std-tx-rollback").Values("note", "std tx rollback").Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("mysql std tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-std-tx-rollback", 0); err != nil {
+		return fmt.Errorf("mysql std tx rollback verify: %w", err)
+	}
+
+	if err := mysqlhelper.NewGormSession(gormDB).Transaction(func(tx session.Session) error {
+		_, err := tx.InsertInto("exec_probe").Values("marker", "mysql-gorm-tx-commit").Values("note", "gorm tx commit").Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("mysql gorm tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-gorm-tx-commit", 1); err != nil {
+		return fmt.Errorf("mysql gorm tx commit verify: %w", err)
+	}
+
+	rollbackErr = mysqlhelper.NewGormSession(gormDB).Transaction(func(tx session.Session) error {
+		if _, err := tx.InsertInto("exec_probe").Values("marker", "mysql-gorm-tx-rollback").Values("note", "gorm tx rollback").Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("mysql gorm tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-gorm-tx-rollback", 0); err != nil {
+		return fmt.Errorf("mysql gorm tx rollback verify: %w", err)
+	}
+
+	if err := gormDB.Transaction(func(gtx *gorm.DB) error {
+		_, err := mysqlhelper.NewGormSession(gtx).
+			InsertInto("exec_probe").
+			Values("marker", "mysql-gorm-provider-commit").
+			Values("note", "gorm provider tx commit").
+			Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("mysql gorm provider tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-gorm-provider-commit", 1); err != nil {
+		return fmt.Errorf("mysql gorm provider tx commit verify: %w", err)
+	}
+
+	rollbackErr = gormDB.Transaction(func(gtx *gorm.DB) error {
+		if _, err := mysqlhelper.NewGormSession(gtx).
+			InsertInto("exec_probe").
+			Values("marker", "mysql-gorm-provider-rollback").
+			Values("note", "gorm provider tx rollback").
+			Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("mysql gorm provider tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-gorm-provider-rollback", 0); err != nil {
+		return fmt.Errorf("mysql gorm provider tx rollback verify: %w", err)
+	}
+
+	sqlTx, err := stdDB.Begin()
+	if err != nil {
+		return fmt.Errorf("mysql std provider tx begin: %w", err)
+	}
+	if _, err := mysqlhelper.NewTxSession(sqlTx).
+		InsertInto("exec_probe").
+		Values("marker", "mysql-std-provider-commit").
+		Values("note", "std provider tx commit").
+		Exec(); err != nil {
+		_ = sqlTx.Rollback()
+		return fmt.Errorf("mysql std provider tx exec: %w", err)
+	}
+	if err := sqlTx.Commit(); err != nil {
+		return fmt.Errorf("mysql std provider tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-std-provider-commit", 1); err != nil {
+		return fmt.Errorf("mysql std provider tx commit verify: %w", err)
+	}
+
+	sqlTx, err = stdDB.Begin()
+	if err != nil {
+		return fmt.Errorf("mysql std provider tx rollback begin: %w", err)
+	}
+	if _, err := mysqlhelper.NewTxSession(sqlTx).
+		InsertInto("exec_probe").
+		Values("marker", "mysql-std-provider-rollback").
+		Values("note", "std provider tx rollback").
+		Exec(); err != nil {
+		_ = sqlTx.Rollback()
+		return fmt.Errorf("mysql std provider tx rollback exec: %w", err)
+	}
+	if err := sqlTx.Rollback(); err != nil {
+		return fmt.Errorf("mysql std provider tx rollback: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = ?", "mysql-std-provider-rollback", 0); err != nil {
+		return fmt.Errorf("mysql std provider tx rollback verify: %w", err)
+	}
+
+	fmt.Println("transactions                     -> std/gorm commit+rollback verified")
+	return nil
+}
+
+func runPostgresTransactions(stdDB *sql.DB, gormDB *gorm.DB) error {
+	if err := postgreshelper.NewSession(stdDB).Transaction(func(tx session.Session) error {
+		_, err := tx.InsertInto("exec_probe").Values("marker", "pg-std-tx-commit").Values("note", "std tx commit").Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("postgres std tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-std-tx-commit", 1); err != nil {
+		return fmt.Errorf("postgres std tx commit verify: %w", err)
+	}
+
+	rollbackErr := postgreshelper.NewSession(stdDB).Transaction(func(tx session.Session) error {
+		if _, err := tx.InsertInto("exec_probe").Values("marker", "pg-std-tx-rollback").Values("note", "std tx rollback").Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("postgres std tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-std-tx-rollback", 0); err != nil {
+		return fmt.Errorf("postgres std tx rollback verify: %w", err)
+	}
+
+	if err := postgreshelper.NewGormSession(gormDB).Transaction(func(tx session.Session) error {
+		_, err := tx.InsertInto("exec_probe").Values("marker", "pg-gorm-tx-commit").Values("note", "gorm tx commit").Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("postgres gorm tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-gorm-tx-commit", 1); err != nil {
+		return fmt.Errorf("postgres gorm tx commit verify: %w", err)
+	}
+
+	rollbackErr = postgreshelper.NewGormSession(gormDB).Transaction(func(tx session.Session) error {
+		if _, err := tx.InsertInto("exec_probe").Values("marker", "pg-gorm-tx-rollback").Values("note", "gorm tx rollback").Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("postgres gorm tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-gorm-tx-rollback", 0); err != nil {
+		return fmt.Errorf("postgres gorm tx rollback verify: %w", err)
+	}
+
+	if err := gormDB.Transaction(func(gtx *gorm.DB) error {
+		_, err := postgreshelper.NewGormSession(gtx).
+			InsertInto("exec_probe").
+			Values("marker", "pg-gorm-provider-commit").
+			Values("note", "gorm provider tx commit").
+			Exec()
+		return err
+	}); err != nil {
+		return fmt.Errorf("postgres gorm provider tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-gorm-provider-commit", 1); err != nil {
+		return fmt.Errorf("postgres gorm provider tx commit verify: %w", err)
+	}
+
+	rollbackErr = gormDB.Transaction(func(gtx *gorm.DB) error {
+		if _, err := postgreshelper.NewGormSession(gtx).
+			InsertInto("exec_probe").
+			Values("marker", "pg-gorm-provider-rollback").
+			Values("note", "gorm provider tx rollback").
+			Exec(); err != nil {
+			return err
+		}
+		return errForceRollback
+	})
+	if !errors.Is(rollbackErr, errForceRollback) {
+		return fmt.Errorf("postgres gorm provider tx rollback: want %v, got %v", errForceRollback, rollbackErr)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-gorm-provider-rollback", 0); err != nil {
+		return fmt.Errorf("postgres gorm provider tx rollback verify: %w", err)
+	}
+
+	sqlTx, err := stdDB.Begin()
+	if err != nil {
+		return fmt.Errorf("postgres std provider tx begin: %w", err)
+	}
+	if _, err := postgreshelper.NewTxSession(sqlTx).
+		InsertInto("exec_probe").
+		Values("marker", "pg-std-provider-commit").
+		Values("note", "std provider tx commit").
+		Exec(); err != nil {
+		_ = sqlTx.Rollback()
+		return fmt.Errorf("postgres std provider tx exec: %w", err)
+	}
+	if err := sqlTx.Commit(); err != nil {
+		return fmt.Errorf("postgres std provider tx commit: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-std-provider-commit", 1); err != nil {
+		return fmt.Errorf("postgres std provider tx commit verify: %w", err)
+	}
+
+	sqlTx, err = stdDB.Begin()
+	if err != nil {
+		return fmt.Errorf("postgres std provider tx rollback begin: %w", err)
+	}
+	if _, err := postgreshelper.NewTxSession(sqlTx).
+		InsertInto("exec_probe").
+		Values("marker", "pg-std-provider-rollback").
+		Values("note", "std provider tx rollback").
+		Exec(); err != nil {
+		_ = sqlTx.Rollback()
+		return fmt.Errorf("postgres std provider tx rollback exec: %w", err)
+	}
+	if err := sqlTx.Rollback(); err != nil {
+		return fmt.Errorf("postgres std provider tx rollback: %w", err)
+	}
+	if err := expectCount(stdDB, "SELECT COUNT(*) FROM exec_probe WHERE marker = $1", "pg-std-provider-rollback", 0); err != nil {
+		return fmt.Errorf("postgres std provider tx rollback verify: %w", err)
+	}
+
+	fmt.Println("transactions                     -> std/gorm commit+rollback verified")
+	return nil
+}
+
 func fetchIDs(db *sql.DB, query string, arg any) ([]int64, error) {
 	rows, err := db.Query(query, arg)
 	if err != nil {
@@ -368,6 +621,26 @@ func fetchIDs(db *sql.DB, query string, arg any) ([]int64, error) {
 	}
 	slices.Sort(ids)
 	return ids, nil
+}
+
+func expectCount(db *sql.DB, query string, arg any, want int64) error {
+	got, err := fetchCount(db, query, arg)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("count = %d, want %d", got, want)
+	}
+	return nil
+}
+
+func fetchCount(db *sql.DB, query string, arg any) (int64, error) {
+	row := db.QueryRow(query, arg)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("%s: %w", compactSQL(query), err)
+	}
+	return count, nil
 }
 
 func compactSQL(sqlText string) string {

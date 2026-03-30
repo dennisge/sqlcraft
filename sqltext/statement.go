@@ -49,6 +49,58 @@ type statement struct {
 	limitingRowsStrategy limitingRowsStrategy
 }
 
+func (s *statement) clone() *statement {
+	cloned := &statement{
+		statementType:        s.statementType,
+		sets:                 cloneStrings(s.sets),
+		selects:              cloneStrings(s.selects),
+		tables:               cloneStrings(s.tables),
+		join:                 cloneStrings(s.join),
+		innerJoin:            cloneStrings(s.innerJoin),
+		outerJoin:            cloneStrings(s.outerJoin),
+		leftOuterJoin:        cloneStrings(s.leftOuterJoin),
+		rightOuterJoin:       cloneStrings(s.rightOuterJoin),
+		where:                cloneStrings(s.where),
+		having:               cloneStrings(s.having),
+		groupBy:              cloneStrings(s.groupBy),
+		orderBy:              cloneStrings(s.orderBy),
+		columns:              cloneStrings(s.columns),
+		values:               cloneStringMatrix(s.values),
+		returning:            cloneStrings(s.returning),
+		distinct:             s.distinct,
+		offset:               s.offset,
+		limit:                s.limit,
+		limitingRowsStrategy: s.limitingRowsStrategy,
+	}
+
+	switch s.lastList {
+	case &s.where:
+		cloned.lastList = &cloned.where
+	case &s.having:
+		cloned.lastList = &cloned.having
+	}
+
+	return cloned
+}
+
+func cloneStrings(src []string) []string {
+	if len(src) == 0 {
+		return nil
+	}
+	return append([]string(nil), src...)
+}
+
+func cloneStringMatrix(src [][]string) [][]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([][]string, len(src))
+	for i, row := range src {
+		out[i] = cloneStrings(row)
+	}
+	return out
+}
+
 func (s *statement) sql(sb *strings.Builder) {
 	switch s.statementType {
 	case doSelect:
