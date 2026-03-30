@@ -24,6 +24,8 @@ A MyBatis-style fluent SQL builder for Go with pluggable execution providers.
 go get github.com/dennisge/sqlcraft
 ```
 
+For maintainers, the release flow is documented in [RELEASING.md](RELEASING.md).
+
 ## Why sqlcraft
 
 `sqlcraft` is aimed at teams that still want to write and read SQL directly,
