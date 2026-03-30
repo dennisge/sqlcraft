@@ -53,10 +53,11 @@ They hide dialect details for `database/sql` and make the recommended path obvio
 
 | Situation | Recommended API | Why |
 |----------|------------------|-----|
-| You have a `driver.Config` and want a GORM-backed session | `mysql.OpenGormSession(cfg)` / `postgres.OpenGormSession(cfg)` | Opens the DB and returns a ready-to-use `session.Session` |
-| You have a `driver.Config` and want a native `database/sql` session | `mysql.OpenSession(cfg)` / `postgres.OpenSession(cfg)` | Opens the DB, applies pool settings, and hides dialect wiring |
+| You want the fastest quick-start with GORM | `mysql.OpenGormSession(cfg)` / `postgres.OpenGormSession(cfg)` | Opens the DB and returns a ready-to-use `session.Session` |
+| You want the fastest quick-start with native `database/sql` | `mysql.OpenSession(cfg)` / `postgres.OpenSession(cfg)` | Opens the DB, applies pool settings, and hides dialect wiring |
 | You already have a `*gorm.DB` | `session.NewGorm(db)` | GORM already knows the database dialect |
 | You already have a `*sql.DB` | `mysql.NewSession(db)` / `postgres.NewSession(db)` | Keeps dialect selection in the provider package |
+| You are wiring a long-lived application service | `mysql.OpenGorm(cfg)` / `postgres.OpenGorm(cfg)` or `mysql.OpenStd(cfg)` / `postgres.OpenStd(cfg)` | Keep one DB pool for the process and create a fresh `session.Session` only when needed |
 | You need the raw DB handle for `Close`, `Ping`, or other integrations | `mysql.OpenGorm(cfg)` / `mysql.OpenStd(cfg)` and then bind manually | Gives you both the raw connection and the fluent session |
 | You need advanced or custom wiring | `session.NewStd(db, session.Dialect...)` | Lowest-level escape hatch |
 
@@ -121,6 +122,118 @@ err = sess.
     Where("status = #{status}", 1).
     Scan(&users)
 ```
+
+### Recommended application wiring
+
+In a real service, do not open a new DB object on every query.
+Treat `*gorm.DB` and `*sql.DB` as long-lived application dependencies, and create a fresh
+`sqlcraft session.Session` only inside repository or service methods.
+
+`session.Session` is stateful and not meant to be shared concurrently.
+
+#### GORM-backed application
+
+```go
+import (
+    "github.com/dennisge/sqlcraft/driver"
+    mysqlhelper "github.com/dennisge/sqlcraft/driver/mysql"
+    "github.com/dennisge/sqlcraft/session"
+    "gorm.io/gorm"
+)
+
+type AppDB struct {
+    Gorm *gorm.DB
+}
+
+func NewAppDB(dsn string) (*AppDB, error) {
+    gdb, err := mysqlhelper.OpenGorm(driver.NormalizeConfig(&driver.Config{
+        DSN: dsn,
+    }))
+    if err != nil {
+        return nil, err
+    }
+    return &AppDB{Gorm: gdb}, nil
+}
+
+func (db *AppDB) SQL() session.Session {
+    return mysqlhelper.NewGormSession(db.Gorm)
+}
+```
+
+```go
+type UserRepo struct {
+    db *AppDB
+}
+
+func (r *UserRepo) List(status session.Optional[int]) ([]User, error) {
+    var users []User
+    err := r.db.SQL().
+        Select("id", "user_name", "status").
+        From("users").
+        WhereSelective("status = #{status}", status).
+        Scan(&users)
+    return users, err
+}
+
+func (r *UserRepo) InTx(fn func(sess session.Session) error) error {
+    return r.db.Gorm.Transaction(func(tx *gorm.DB) error {
+        return fn(mysqlhelper.NewGormSession(tx))
+    })
+}
+```
+
+#### `database/sql`-backed application
+
+```go
+import (
+    "database/sql"
+
+    "github.com/dennisge/sqlcraft/driver"
+    postgreshelper "github.com/dennisge/sqlcraft/driver/postgres"
+    "github.com/dennisge/sqlcraft/session"
+)
+
+type AppDB struct {
+    SQL *sql.DB
+}
+
+func NewAppDB(dsn string) (*AppDB, error) {
+    sqldb, err := postgreshelper.OpenStd(driver.NormalizeConfig(&driver.Config{
+        DSN: dsn,
+    }))
+    if err != nil {
+        return nil, err
+    }
+    return &AppDB{SQL: sqldb}, nil
+}
+
+func (db *AppDB) SQLSession() session.Session {
+    return postgreshelper.NewSession(db.SQL)
+}
+```
+
+```go
+type UserRepo struct {
+    db *AppDB
+}
+
+func (r *UserRepo) List(enabled session.Optional[bool]) ([]User, error) {
+    var users []User
+    err := r.db.SQLSession().
+        Select("id", "user_name", "enabled").
+        From("users").
+        WhereSelective("enabled = #{enabled}", enabled).
+        Scan(&users)
+    return users, err
+}
+
+func (r *UserRepo) InTx(fn func(sess session.Session) error) error {
+    return r.db.SQLSession().Transaction(fn)
+}
+```
+
+This pattern keeps connection pools stable, avoids rebuilding dialect state on every call,
+and still gives each query a fresh fluent builder.
 
 ## Common Patterns
 
